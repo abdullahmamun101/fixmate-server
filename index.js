@@ -446,6 +446,7 @@ app.get("/api/technician/my-services", verifyToken, async (req, res) => {
 });
 
 
+
 app.post("/api/technician/services", verifyToken, async (req, res) => {
   try {
     if (req.user.role !== "technician") {
@@ -460,6 +461,9 @@ app.post("/api/technician/services", verifyToken, async (req, res) => {
       description,
       basePrice,
       serviceMode,
+      serviceArea,
+      estimatedDuration,
+      image,
     } = req.body;
 
     if (
@@ -467,6 +471,8 @@ app.post("/api/technician/services", verifyToken, async (req, res) => {
       !category?.trim() ||
       !description?.trim() ||
       !serviceMode?.trim() ||
+      !serviceArea?.trim() ||
+      !estimatedDuration?.trim() ||
       basePrice === undefined
     ) {
       return res.status(400).json({
@@ -488,6 +494,9 @@ app.post("/api/technician/services", verifyToken, async (req, res) => {
       description: description.trim(),
       basePrice: price,
       serviceMode: serviceMode.trim(),
+      serviceArea: serviceArea.trim(),
+      estimatedDuration: estimatedDuration.trim(),
+      image: image?.trim() || "",
       technicianEmail: req.user.email,
       approvalStatus: "pending",
       isAvailable: true,
@@ -508,6 +517,7 @@ app.post("/api/technician/services", verifyToken, async (req, res) => {
     });
   }
 });
+
 
 
 app.patch("/api/technician/services/:id", verifyToken, async (req, res) => {
