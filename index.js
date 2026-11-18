@@ -1,3 +1,4 @@
+import multer from "multer";
 import Stripe from "stripe";
 import dns from "node:dns";
 dns.setServers(["8.8.8.8", "1.1.1.1"]);
@@ -9,6 +10,20 @@ import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 import verifyToken from "./src/middleware/verifyToken.js";
 
 dotenv.config();
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024,
+  },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith("image/")) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only image files are allowed"));
+    }
+  },
+});
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
@@ -89,7 +104,7 @@ app.post(
     }
   }
 );
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 app.post(
   "/api/payments/create-checkout-session",
   verifyToken,
@@ -200,6 +215,51 @@ async function connectDB() {
 
   console.log("MongoDB connected");
 }
+
+app.post("/api/upload-image", verifyToken, upload.single("image"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        message: "Please select an image",
+      });
+    }
+
+    if (!["technician", "admin"].includes(req.user.role)) {
+      return res.status(403).json({
+        message: "Access denied",
+      });
+    }
+
+    const formData = new URLSearchParams();
+    formData.append("image", req.file.buffer.toString("base64"));
+
+    const response = await fetch(
+      `https://api.imgbb.com/1/upload?key=${process.env.IMGBB_API_KEY}`,
+      {
+        method: "POST",
+        body: formData,
+      }
+    );
+
+    const result = await response.json();
+
+    if (!response.ok || !result.success) {
+      return res.status(500).json({
+        message: "Image upload failed",
+      });
+    }
+
+    res.status(200).json({
+      message: "Image uploaded successfully",
+      imageUrl: result.data.url,
+    });
+  } catch (error) {
+    console.error("Image upload error:", error);
+    res.status(500).json({
+      message: "Failed to upload image",
+    });
+  }
+});
 
 app.get("/", (req, res) => {
   res.send("FixMate server is running");
