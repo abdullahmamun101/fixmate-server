@@ -29,7 +29,29 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 const port = process.env.PORT || 5000;
 
-app.use(cors({ origin: process.env.CLIENT_URL, credentials: true }));
+const allowedOrigins = [
+  process.env.CLIENT_URL,
+  "http://localhost:3000",
+].filter(Boolean).map((origin) => origin.replace(/\/$/, ""));
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (
+        !origin ||
+        allowedOrigins.includes(origin.replace(/\/$/, ""))
+      ) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
 app.post(
   "/api/payments/webhook",
   express.raw({ type: "application/json" }),
@@ -104,6 +126,7 @@ app.post(
     }
   }
 );
+
 app.use(express.json({ limit: "10mb" }));
 app.post(
   "/api/payments/create-checkout-session",
