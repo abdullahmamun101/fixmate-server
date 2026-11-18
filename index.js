@@ -1,4 +1,4 @@
-
+import Stripe from "stripe";
 import dns from "node:dns";
 dns.setServers(["8.8.8.8", "1.1.1.1"]);
 
@@ -10,11 +10,172 @@ import verifyToken from "./src/middleware/verifyToken.js";
 
 dotenv.config();
 
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 const port = process.env.PORT || 5000;
 
 app.use(cors({ origin: process.env.CLIENT_URL, credentials: true }));
+app.post(
+  "/api/payments/webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    const signature = req.headers["stripe-signature"];
+
+    let event;
+
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        signature,
+        process.env.STRIPE_WEBHOOK_SECRET
+      );
+    } catch (error) {
+      return res.status(400).send(`Webhook Error: ${error.message}`);
+    }
+
+    try {
+      if (event.type === "checkout.session.completed") {
+        const session = event.data.object;
+        const bookingId = session.metadata?.bookingId;
+
+        if (!bookingId || !ObjectId.isValid(bookingId)) {
+          return res.status(400).json({ message: "Invalid booking ID" });
+        }
+
+        const booking = await collections.bookings.findOne({
+          _id: new ObjectId(bookingId),
+          status: "completed",
+          paymentStatus: "unpaid",
+        });
+
+        if (booking) {
+          const existingPayment = await collections.payments.findOne({
+            sessionId: session.id,
+          });
+
+          if (!existingPayment) {
+            await collections.payments.insertOne({
+              bookingId: booking._id,
+              customerEmail: booking.customerEmail,
+              technicianEmail: booking.technicianEmail,
+              amount: session.amount_total / 100,
+              currency: session.currency,
+              sessionId: session.id,
+              paymentIntentId: session.payment_intent,
+              status: "paid",
+              createdAt: new Date(),
+            });
+
+            await collections.bookings.updateOne(
+              {
+                _id: booking._id,
+                paymentStatus: "unpaid",
+              },
+              {
+                $set: {
+                  paymentStatus: "paid",
+                  paidAt: new Date(),
+                },
+              }
+            );
+          }
+        }
+      }
+
+      res.json({ received: true });
+    } catch (error) {
+      console.error("Webhook processing error:", error);
+      res.status(500).json({ message: "Webhook processing failed" });
+    }
+  }
+);
 app.use(express.json());
+app.post(
+  "/api/payments/create-checkout-session",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const { bookingId } = req.body;
+
+      if (!ObjectId.isValid(bookingId)) {
+        return res.status(400).json({ message: "Invalid booking ID" });
+      }
+
+      const booking = await collections.bookings.findOne({
+        _id: new ObjectId(bookingId),
+        customerEmail: req.user.email,
+        status: "completed",
+        paymentStatus: "unpaid",
+      });
+
+      if (!booking) {
+        return res.status(404).json({
+          message: "Completed unpaid booking not found",
+        });
+      }
+
+      const amount = Number(booking.finalAmount);
+
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return res.status(400).json({
+          message: "Invalid booking amount",
+        });
+      }
+
+      const session = await stripe.checkout.sessions.create({
+        payment_method_types: ["card"],
+        mode: "payment",
+        customer_email: booking.customerEmail,
+
+        line_items: [
+          {
+            price_data: {
+              currency: "bdt",
+              product_data: {
+                name: booking.serviceTitle,
+              },
+              unit_amount: Math.round(amount * 100),
+            },
+            quantity: 1,
+          },
+        ],
+
+        metadata: {
+          bookingId: booking._id.toString(),
+          customerEmail: booking.customerEmail,
+        },
+
+        success_url: `${process.env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${process.env.CLIENT_URL}/payment/cancel`,
+      });
+
+      res.json({ url: session.url });
+    } catch (error) {
+      console.error("Checkout session error:", error);
+      res.status(500).json({
+        message: "Failed to create checkout session",
+      });
+    }
+  }
+);
+
+app.get("/api/payments/my-payments", verifyToken, async (req, res) => {
+  try {
+    if (req.user.role !== "customer") {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    const payments = await collections.payments
+      .find({ customerEmail: req.user.email })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json(payments);
+  } catch (error) {
+    console.error("Customer payments error:", error);
+    res.status(500).json({ message: "Failed to load payments" });
+  }
+});
 
 const client = new MongoClient(process.env.MONGODB_URI, {
   serverApi: {
