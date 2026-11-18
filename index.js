@@ -231,7 +231,7 @@ async function connectDB() {
   db = client.db(process.env.DB_NAME);
 
   collections.users = db.collection("users");
-  collections.authUsers = db.collection("authUsers");
+  collections.authUsers = db.collection("user");
   collections.services = db.collection("services");
   collections.bookings = db.collection("bookings");
   collections.payments = db.collection("payments");
@@ -896,6 +896,7 @@ app.delete("/api/technician/services/:id", verifyToken, async (req, res) => {
 });
 
 // Admin: Get all users
+
 app.get("/api/admin/users", verifyToken, async (req, res) => {
   try {
     if (req.user.role !== "admin") {
@@ -931,6 +932,8 @@ app.get("/api/admin/users", verifyToken, async (req, res) => {
 });
 
 
+
+
 app.patch("/api/admin/users/:id/role", verifyToken, async (req, res) => {
   try {
     if (req.user.role !== "admin") {
@@ -944,6 +947,12 @@ app.patch("/api/admin/users/:id/role", verifyToken, async (req, res) => {
 
     const allowedRoles = ["customer", "technician", "admin"];
 
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        message: "Invalid user ID",
+      });
+    }
+
     if (!allowedRoles.includes(role)) {
       return res.status(400).json({
         message: "Invalid user role",
@@ -951,7 +960,7 @@ app.patch("/api/admin/users/:id/role", verifyToken, async (req, res) => {
     }
 
     const result = await collections.authUsers.updateOne(
-      { _id: id },
+      { _id: new ObjectId(id) },
       {
         $set: {
           role,
@@ -977,6 +986,7 @@ app.patch("/api/admin/users/:id/role", verifyToken, async (req, res) => {
     });
   }
 });
+
 
 
 app.get("/api/admin/services", verifyToken, async (req, res) => {
