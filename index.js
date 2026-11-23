@@ -564,17 +564,10 @@ app.patch("/api/users/profile", verifyToken, async (req, res) => {
 });
 
 
+
 app.post(
   "/api/upload-image",
   verifyToken,
-  (req, res, next) => {
-    if (!["technician", "admin"].includes(req.user.role)) {
-      return res.status(403).json({
-        message: "Access denied",
-      });
-    }
-    next();
-  },
   upload.single("image"),
   async (req, res) => {
     try {
@@ -609,12 +602,14 @@ app.post(
       });
     } catch (error) {
       console.error("Image upload error:", error);
+
       res.status(500).json({
         message: "Failed to upload image",
       });
     }
   }
 );
+
 
 app.get("/", (req, res) => {
   res.send("FixMate server is running");
