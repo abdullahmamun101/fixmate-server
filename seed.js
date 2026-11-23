@@ -77,7 +77,7 @@ const seedServices = [
   {
     title: "Washing Machine Repair",
     category: "Appliance Repair",
-    description: "Washing machine troubleshooting and repair.",
+    description: "Washing machine troubleshooting and repair service.",
     basePrice: 1800,
     estimatedDuration: "2 hours",
     image: "https://images.unsplash.com/photo-1626806787461-102c1bfaaea1?auto=format&fit=crop&w=1000&q=80",
@@ -106,10 +106,32 @@ async function runSeed() {
 
     const db = client.db(process.env.DB_NAME);
     const servicesCollection = db.collection("services");
+    const usersCollection = db.collection("user");
 
     const now = new Date();
 
     for (const [index, service] of seedServices.entries()) {
+      const technicianEmail =
+        index % 2 === 0
+          ? "technician@gmail.com"
+          : "test@gmail.com";
+
+      const technician = await usersCollection.findOne({
+        email: technicianEmail,
+      });
+
+      const serviceData = {
+        ...service,
+        serviceMode: "both",
+        serviceArea: "Dhaka",
+        technicianName: technician?.name || "FixMate Technician",
+        technicianEmail,
+        approvalStatus: "approved",
+        isAvailable: true,
+        approvedBy: "admin@gmail.com",
+        updatedAt: now,
+      };
+
       const existingService = await servicesCollection.findOne({
         title: service.title,
         category: service.category,
@@ -118,31 +140,23 @@ async function runSeed() {
       if (existingService) {
         await servicesCollection.updateOne(
           { _id: existingService._id },
-          { $set: { image: service.image } }
+          {
+            $set: serviceData,
+          }
         );
 
-        console.log(`Image updated: ${service.title}`);
+        console.log(`Service updated: ${service.title}`);
       } else {
         await servicesCollection.insertOne({
-          ...service,
-          serviceMode: "both",
-          serviceArea: "Dhaka",
-          technicianEmail:
-            index % 2 === 0
-              ? "technician@gmail.com"
-              : "test@gmail.com",
-          approvalStatus: "approved",
-          isAvailable: true,
+          ...serviceData,
           createdAt: now,
-          updatedAt: now,
-          approvedBy: "admin@gmail.com",
         });
 
         console.log(`New service inserted: ${service.title}`);
       }
     }
 
-    console.log("All service images processed successfully.");
+    console.log("All services seeded successfully.");
   } catch (error) {
     console.error("Seed error:", error);
   } finally {
@@ -151,4 +165,5 @@ async function runSeed() {
 }
 
 runSeed();
+
 

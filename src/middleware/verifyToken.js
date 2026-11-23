@@ -28,8 +28,33 @@ const verifyToken = async (req, res, next) => {
     req.user = payload;
     next();
   } catch (error) {
-    return res.status(401).json({ message: "Invalid or expired token" });
+    return res.status(401).json({
+      message: "Invalid or expired token",
+    });
   }
 };
 
+const verifyCustomer = (req, res, next) => {
+  if (req.user?.role !== "customer") {
+    return res.status(403).json({ message: "Customer access required" });
+  }
+  next();
+};
+
+const verifyTechnician = (req, res, next) => {
+  if (req.user?.role !== "technician") {
+    return res.status(403).json({ message: "Technician access required" });
+  }
+  next();
+};
+
+const verifyAdmin = (req, res, next) => {
+  if (req.user?.role !== "admin") {
+    return res.status(403).json({ message: "Admin access required" });
+  }
+  next();
+};
+
+export { verifyCustomer, verifyTechnician, verifyAdmin };
 export default verifyToken;
+

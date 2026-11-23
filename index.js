@@ -7,7 +7,11 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
-import verifyToken from "./src/middleware/verifyToken.js";
+import verifyToken, {
+  verifyCustomer,
+  verifyTechnician,
+  verifyAdmin,
+} from "./src/middleware/verifyToken.js";
 
 dotenv.config();
 
@@ -53,9 +57,128 @@ app.use(
 );
 
 
+app.use(
+  express.json({
+    verify: (req, res, buffer) => {
+      if (req.originalUrl === "/api/payments/webhook") {
+        req.rawBody = buffer;
+      }
+    },
+  })
+);
+
+
+app.get("/api/payments/verify", verifyToken, verifyCustomer, async (req, res) => {
+  try {
+
+    const { session_id } = req.query;
+
+    if (!session_id) {
+      return res.status(400).json({ message: "Session ID is required" });
+    }
+
+    const stripeSession = await stripe.checkout.sessions.retrieve(
+      session_id
+    );
+
+    if (stripeSession.payment_status !== "paid") {
+      return res.status(400).json({ message: "Payment not completed" });
+    }
+
+    const bookingId = stripeSession.metadata?.bookingId;
+
+    if (!bookingId || !ObjectId.isValid(bookingId)) {
+      return res.status(400).json({ message: "Invalid booking ID" });
+    }
+
+    const bookingObjectId = new ObjectId(bookingId);
+
+    const booking = await collections.bookings.findOne({
+      _id: bookingObjectId,
+      customerEmail: req.user.email,
+      status: "completed",
+    });
+
+    if (!booking) {
+      return res.status(404).json({ message: "Booking not found" });
+    }
+
+    const expectedAmount = Math.round(Number(booking.finalAmount) * 100);
+
+    if (
+      stripeSession.amount_total !== expectedAmount ||
+      stripeSession.currency !== "usd" ||
+      stripeSession.customer_email !== booking.customerEmail
+    ) {
+      return res.status(400).json({
+        message: "Payment verification failed",
+      });
+    }
+
+    const mongoSession = client.startSession();
+
+    try {
+      await mongoSession.withTransaction(async () => {
+        const existingPayment = await collections.payments.findOne(
+          { stripeSessionId: stripeSession.id },
+          { session: mongoSession }
+        );
+
+        if (!existingPayment) {
+          if (booking.paymentStatus !== "unpaid") {
+            throw new Error("Invalid booking payment status");
+          }
+
+          await collections.payments.insertOne(
+            {
+              bookingId: bookingObjectId.toString(),
+              serviceTitle: booking.serviceTitle,
+              customerName: booking.customerName,
+              customerEmail: booking.customerEmail,
+              technicianName: booking.technicianName,
+              technicianEmail: booking.technicianEmail,
+              amount: stripeSession.amount_total / 100,
+              currency: "usd",
+              transactionId: stripeSession.payment_intent,
+              stripeSessionId: stripeSession.id,
+              paymentStatus: "paid",
+              paidAt: new Date(),
+            },
+            { session: mongoSession }
+          );
+        }
+
+        await collections.bookings.updateOne(
+          { _id: bookingObjectId, paymentStatus: "unpaid" },
+          {
+            $set: {
+              paymentStatus: "paid",
+              paidAt: new Date(),
+            },
+          },
+          { session: mongoSession }
+        );
+      });
+    } finally {
+      await mongoSession.endSession();
+    }
+
+    res.json({
+      message: "Payment verified successfully",
+      amount: stripeSession.amount_total / 100,
+      transactionId: stripeSession.payment_intent,
+    });
+  } catch (error) {
+    console.error("Payment verification error:", error);
+
+    res.status(500).json({
+      message: "Payment verification failed",
+    });
+  }
+});
+
 app.post(
   "/api/payments/webhook",
-  express.raw({ type: "application/json" }),
   async (req, res) => {
     const signature = req.headers["stripe-signature"];
 
@@ -63,7 +186,7 @@ app.post(
 
     try {
       event = stripe.webhooks.constructEvent(
-        req.body,
+        req.rawBody,
         signature,
         process.env.STRIPE_WEBHOOK_SECRET
       );
@@ -122,14 +245,14 @@ app.post(
 
         if (
           stripeSession.amount_total !== expectedAmount ||
-          stripeSession.currency !== "bdt"
+          stripeSession.currency !== "usd"
         ) {
           throw new Error("Payment amount or currency mismatch");
         }
 
         // Prevent duplicate payment for the same booking
         const existingPayment = await collections.payments.findOne(
-          { bookingId: bookingObjectId },
+          { stripeSessionId: stripeSession.id },
           { session: mongoSession }
         );
 
@@ -161,15 +284,18 @@ app.post(
 
         await collections.payments.insertOne(
           {
-            bookingId: bookingObjectId,
+            bookingId: bookingObjectId.toString(),
+            serviceTitle: booking.serviceTitle,
+            customerName: booking.customerName,
             customerEmail: booking.customerEmail,
+            technicianName: booking.technicianName,
             technicianEmail: booking.technicianEmail,
             amount: stripeSession.amount_total / 100,
-            currency: stripeSession.currency,
-            sessionId: stripeSession.id,
-            paymentIntentId: stripeSession.payment_intent,
-            status: "paid",
-            createdAt: new Date(),
+            currency: "usd",
+            transactionId: stripeSession.payment_intent,
+            stripeSessionId: stripeSession.id,
+            paymentStatus: "paid",
+            paidAt: new Date(),
           },
           { session: mongoSession }
         );
@@ -211,6 +337,7 @@ app.post(
 app.post(
   "/api/payments/create-checkout-session",
   verifyToken,
+  verifyCustomer,
   async (req, res) => {
     try {
       const { bookingId } = req.body;
@@ -288,7 +415,7 @@ app.post(
           line_items: [
             {
               price_data: {
-                currency: "bdt",
+                currency: "usd",
                 product_data: {
                   name: booking.serviceTitle,
                 },
@@ -336,15 +463,11 @@ app.post(
 );
 
 
-app.get("/api/payments/my-payments", verifyToken, async (req, res) => {
+app.get("/api/payments/my-payments", verifyToken, verifyCustomer, async (req, res) => {
   try {
-    if (req.user.role !== "customer") {
-      return res.status(403).json({ message: "Access denied" });
-    }
-
     const payments = await collections.payments
       .find({ customerEmail: req.user.email })
-      .sort({ createdAt: -1 })
+      .sort({ paidAt: -1 })
       .toArray();
 
     res.json(payments);
@@ -376,72 +499,122 @@ async function connectDB() {
   collections.payments = db.collection("payments");
 
   await collections.payments.createIndex(
-  { bookingId: 1 },
-  {
-    unique: true,
-    partialFilterExpression: {
-      bookingId: { $exists: true },
-    },
-  }
-);
+    { bookingId: 1 },
+    {
+      unique: true,
+      partialFilterExpression: {
+        bookingId: { $exists: true },
+      },
+    }
+  );
 
-await collections.payments.createIndex(
-  { sessionId: 1 },
-  {
-    unique: true,
-    partialFilterExpression: {
-      sessionId: { $exists: true },
-    },
-  }
-);
+  await collections.payments.createIndex(
+    { stripeSessionId: 1 },
+    {
+      unique: true,
+      partialFilterExpression: {
+        stripeSessionId: { $exists: true },
+      },
+    }
+  );
 
   console.log("MongoDB connected");
 }
 
-app.post("/api/upload-image", verifyToken, upload.single("image"), async (req, res) => {
+app.patch("/api/users/profile", verifyToken, async (req, res) => {
   try {
-    if (!req.file) {
+    const { name, image, phone, area, bio } = req.body;
+
+    if (!name || !name.trim()) {
       return res.status(400).json({
-        message: "Please select an image",
+        message: "Name is required",
       });
     }
 
+    const result = await collections.authUsers.updateOne(
+      { _id: new ObjectId(req.user.id) },
+      {
+        $set: {
+          name: name.trim(),
+          image: image || "",
+          phone: phone || "",
+          area: area || "",
+          bio: bio || "",
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        message: "User not found",
+      });
+    }
+
+    res.json({
+      message: "Profile updated successfully",
+    });
+  } catch (error) {
+    console.error("Profile update error:", error);
+
+    res.status(500).json({
+      message: "Failed to update profile",
+    });
+  }
+});
+
+
+app.post(
+  "/api/upload-image",
+  verifyToken,
+  (req, res, next) => {
     if (!["technician", "admin"].includes(req.user.role)) {
       return res.status(403).json({
         message: "Access denied",
       });
     }
-
-    const formData = new URLSearchParams();
-    formData.append("image", req.file.buffer.toString("base64"));
-
-    const response = await fetch(
-      `https://api.imgbb.com/1/upload?key=${process.env.IMGBB_API_KEY}`,
-      {
-        method: "POST",
-        body: formData,
+    next();
+  },
+  upload.single("image"),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          message: "Please select an image",
+        });
       }
-    );
 
-    const result = await response.json();
+      const formData = new URLSearchParams();
+      formData.append("image", req.file.buffer.toString("base64"));
 
-    if (!response.ok || !result.success) {
-      return res.status(500).json({
-        message: "Image upload failed",
+      const response = await fetch(
+        `https://api.imgbb.com/1/upload?key=${process.env.IMGBB_API_KEY}`,
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
+
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        return res.status(500).json({
+          message: "Image upload failed",
+        });
+      }
+
+      res.status(200).json({
+        message: "Image uploaded successfully",
+        imageUrl: result.data.url,
+      });
+    } catch (error) {
+      console.error("Image upload error:", error);
+      res.status(500).json({
+        message: "Failed to upload image",
       });
     }
-
-    res.status(200).json({
-      message: "Image uploaded successfully",
-      imageUrl: result.data.url,
-    });
-  } catch (error) {
-    console.error("Image upload error:", error);
-    res.status(500).json({
-      message: "Failed to upload image",
-    });
   }
-});
+);
 
 app.get("/", (req, res) => {
   res.send("FixMate server is running");
@@ -520,7 +693,7 @@ app.get("/api/services/:id", async (req, res) => {
 });
 
 // Create booking
-app.post("/api/bookings", verifyToken, async (req, res) => {
+app.post("/api/bookings", verifyToken, verifyCustomer, async (req, res) => {
   try {
     const {
       serviceId,
@@ -548,9 +721,9 @@ app.post("/api/bookings", verifyToken, async (req, res) => {
       });
     }
 
-    if (req.user.role !== "customer") {
-      return res.status(403).json({
-        message: "Only customers can book services",
+    if (problemDescription.trim().length < 20) {
+      return res.status(400).json({
+        message: "Problem description must be at least 20 characters",
       });
     }
 
@@ -581,7 +754,10 @@ app.post("/api/bookings", verifyToken, async (req, res) => {
     }
 
     const existingBooking = await collections.bookings.findOne({
-      serviceId: new ObjectId(serviceId),
+      $or: [
+        { serviceId: serviceId.toString() },
+        { serviceId: new ObjectId(serviceId) },
+      ],
       customerEmail: req.user.email,
       status: { $in: ["requested", "accepted", "in-progress"] },
     });
@@ -592,19 +768,31 @@ app.post("/api/bookings", verifyToken, async (req, res) => {
       });
     }
 
+    const customer = await collections.authUsers.findOne({
+      email: req.user.email,
+    });
+
+    const technician = await collections.authUsers.findOne({
+      email: service.technicianEmail,
+    });
+
     const booking = {
-      serviceId: new ObjectId(serviceId),
+      serviceId: serviceId.toString(),
       serviceTitle: service.title,
+      serviceImage: service.image || "",
+      category: service.category,
+      basePrice: Number(service.basePrice),
+      technicianName: technician?.name || service.technicianName || "",
+      customerName: customer?.name || "",
       technicianEmail: service.technicianEmail,
-      customerEmail: req.user.email,
-      customerName: req.user.name,
-      phone: phone.trim(),
+      customerEmail: customer.email,
+      customerPhone: customer.phone,
       address: address.trim(),
       preferredDate: date,
       problemDescription: problemDescription.trim(),
       status: "requested",
-      paymentStatus: "unpaid",
       finalAmount: null,
+      paymentStatus: "unpaid",
       createdAt: new Date(),
     };
 
@@ -625,38 +813,32 @@ app.post("/api/bookings", verifyToken, async (req, res) => {
 
 
 // Get logged-in customer's bookings
-app.get("/api/bookings/my-bookings", verifyToken, async (req, res) => {
-  try {
-    if (req.user.role !== "customer") {
-      return res.status(403).json({
-        message: "Only customers can view their bookings",
+app.get(
+  "/api/bookings/my-bookings",
+  verifyToken,
+  verifyCustomer,
+  async (req, res) => {
+    try {
+      const bookings = await collections.bookings
+        .find({ customerEmail: req.user.email })
+        .sort({ createdAt: -1 })
+        .toArray();
+
+      res.json(bookings);
+    } catch (err) {
+      console.error("Fetch bookings error:", err);
+
+      res.status(500).json({
+        message: "Failed to fetch bookings",
       });
     }
-
-    const bookings = await collections.bookings
-      .find({ customerEmail: req.user.email })
-      .sort({ createdAt: -1 })
-      .toArray();
-
-    res.json(bookings);
-  } catch (err) {
-    console.error("Fetch bookings error:", err);
-
-    res.status(500).json({
-      message: "Failed to fetch bookings",
-    });
   }
-});
+);
 
 
 // Cancel customer's booking
-app.patch("/api/bookings/:id/cancel", verifyToken, async (req, res) => {
+app.patch("/api/bookings/:id/cancel", verifyToken, verifyCustomer, async (req, res) => {
   try {
-    if (req.user.role !== "customer") {
-      return res.status(403).json({
-        message: "Only customers can cancel bookings",
-      });
-    }
 
     const { id } = req.params;
 
@@ -700,13 +882,8 @@ app.patch("/api/bookings/:id/cancel", verifyToken, async (req, res) => {
 
 
 // Get technician's booking requests
-app.get("/api/technician/requests", verifyToken, async (req, res) => {
+app.get("/api/technician/requests", verifyToken, verifyTechnician, async (req, res) => {
   try {
-    if (req.user.role !== "technician") {
-      return res.status(403).json({
-        message: "Only technicians can view booking requests",
-      });
-    }
 
     const requests = await collections.bookings
       .find({ technicianEmail: req.user.email })
@@ -724,13 +901,8 @@ app.get("/api/technician/requests", verifyToken, async (req, res) => {
 });
 
 
-app.patch("/api/technician/requests/:id/status", verifyToken, async (req, res) => {
+app.patch("/api/technician/requests/:id/status", verifyToken, verifyTechnician, async (req, res) => {
   try {
-    if (req.user.role !== "technician") {
-      return res.status(403).json({
-        message: "Only technicians can update booking status",
-      });
-    }
 
     const { id } = req.params;
     const { status, finalAmount } = req.body;
@@ -825,13 +997,8 @@ app.patch("/api/technician/requests/:id/status", verifyToken, async (req, res) =
 });
 
 
-app.get("/api/technician/my-services", verifyToken, async (req, res) => {
+app.get("/api/technician/my-services", verifyToken, verifyTechnician, async (req, res) => {
   try {
-    if (req.user.role !== "technician") {
-      return res.status(403).json({
-        message: "Only technicians can view their services",
-      });
-    }
 
     const services = await collections.services
       .find({ technicianEmail: req.user.email })
@@ -850,14 +1017,9 @@ app.get("/api/technician/my-services", verifyToken, async (req, res) => {
 
 
 
-app.post("/api/technician/services", verifyToken, async (req, res) => {
-  try {
-    if (req.user.role !== "technician") {
-      return res.status(403).json({
-        message: "Only technicians can add services",
-      });
-    }
 
+app.post("/api/technician/services", verifyToken, verifyTechnician, async (req, res) => {
+  try {
     const {
       title,
       category,
@@ -891,6 +1053,16 @@ app.post("/api/technician/services", verifyToken, async (req, res) => {
       });
     }
 
+    const technician = await collections.authUsers.findOne({
+      email: req.user.email,
+    });
+
+    if (!technician) {
+      return res.status(404).json({
+        message: "Technician account not found",
+      });
+    }
+
     const newService = {
       title: title.trim(),
       category: category.trim(),
@@ -900,6 +1072,7 @@ app.post("/api/technician/services", verifyToken, async (req, res) => {
       serviceArea: serviceArea.trim(),
       estimatedDuration: estimatedDuration.trim(),
       image: image?.trim() || "",
+      technicianName: technician.name || "",
       technicianEmail: req.user.email,
       approvalStatus: "pending",
       isAvailable: true,
@@ -923,14 +1096,10 @@ app.post("/api/technician/services", verifyToken, async (req, res) => {
 
 
 
-app.patch("/api/technician/services/:id", verifyToken, async (req, res) => {
-  try {
-    if (req.user.role !== "technician") {
-      return res.status(403).json({
-        message: "Only technicians can edit services",
-      });
-    }
 
+
+app.patch("/api/technician/services/:id", verifyToken, verifyTechnician, async (req, res) => {
+  try {
     const { id } = req.params;
     const {
       title,
@@ -962,6 +1131,16 @@ app.patch("/api/technician/services/:id", verifyToken, async (req, res) => {
       });
     }
 
+    const technician = await collections.authUsers.findOne({
+      email: req.user.email,
+    });
+
+    if (!technician) {
+      return res.status(404).json({
+        message: "Technician account not found",
+      });
+    }
+
     const result = await collections.services.updateOne(
       {
         _id: new ObjectId(id),
@@ -974,6 +1153,7 @@ app.patch("/api/technician/services/:id", verifyToken, async (req, res) => {
           description: description.trim(),
           basePrice: price,
           serviceMode: serviceMode.trim(),
+          technicianName: technician.name || "",
           approvalStatus: "pending",
           updatedAt: new Date(),
         },
@@ -999,13 +1179,9 @@ app.patch("/api/technician/services/:id", verifyToken, async (req, res) => {
 });
 
 
-app.delete("/api/technician/services/:id", verifyToken, async (req, res) => {
+
+app.delete("/api/technician/services/:id", verifyToken, verifyTechnician, async (req, res) => {
   try {
-    if (req.user.role !== "technician") {
-      return res.status(403).json({
-        message: "Only technicians can delete services",
-      });
-    }
 
     const { id } = req.params;
 
@@ -1027,7 +1203,10 @@ app.delete("/api/technician/services/:id", verifyToken, async (req, res) => {
     }
 
     const activeBooking = await collections.bookings.findOne({
-      serviceId: new ObjectId(id),
+      $or: [
+        { serviceId: id },
+        { serviceId: new ObjectId(id) },
+      ],
       status: { $in: ["requested", "accepted", "in-progress"] },
     });
 
@@ -1056,13 +1235,8 @@ app.delete("/api/technician/services/:id", verifyToken, async (req, res) => {
 
 // Admin: Get all users
 
-app.get("/api/admin/users", verifyToken, async (req, res) => {
+app.get("/api/admin/users", verifyToken, verifyAdmin, async (req, res) => {
   try {
-    if (req.user.role !== "admin") {
-      return res.status(403).json({
-        message: "Only admins can view users",
-      });
-    }
 
     const users = await collections.authUsers
       .find(
@@ -1093,13 +1267,8 @@ app.get("/api/admin/users", verifyToken, async (req, res) => {
 
 
 
-app.patch("/api/admin/users/:id/role", verifyToken, async (req, res) => {
+app.patch("/api/admin/users/:id/role", verifyToken, verifyAdmin, async (req, res) => {
   try {
-    if (req.user.role !== "admin") {
-      return res.status(403).json({
-        message: "Only admins can update user roles",
-      });
-    }
 
     const { id } = req.params;
     const { role } = req.body;
@@ -1153,13 +1322,8 @@ app.patch("/api/admin/users/:id/role", verifyToken, async (req, res) => {
 
 
 
-app.get("/api/admin/services", verifyToken, async (req, res) => {
+app.get("/api/admin/services", verifyToken, verifyAdmin, async (req, res) => {
   try {
-    if (req.user.role !== "admin") {
-      return res.status(403).json({
-        message: "Only admins can view services",
-      });
-    }
 
     const services = await collections.services
       .find({})
@@ -1177,13 +1341,8 @@ app.get("/api/admin/services", verifyToken, async (req, res) => {
 });
 
 
-app.patch("/api/admin/services/:id/status", verifyToken, async (req, res) => {
+app.patch("/api/admin/services/:id/status", verifyToken, verifyAdmin, async (req, res) => {
   try {
-    if (req.user.role !== "admin") {
-      return res.status(403).json({
-        message: "Only admins can update service status",
-      });
-    }
 
     const { id } = req.params;
     const { approvalStatus } = req.body;
@@ -1233,13 +1392,8 @@ app.patch("/api/admin/services/:id/status", verifyToken, async (req, res) => {
 });
 
 
-app.get("/api/admin/bookings", verifyToken, async (req, res) => {
+app.get("/api/admin/bookings", verifyToken, verifyAdmin, async (req, res) => {
   try {
-    if (req.user.role !== "admin") {
-      return res.status(403).json({
-        message: "Only admins can view bookings",
-      });
-    }
 
     const bookings = await collections.bookings
       .find({})
@@ -1257,17 +1411,12 @@ app.get("/api/admin/bookings", verifyToken, async (req, res) => {
 });
 
 
-app.get("/api/admin/transactions", verifyToken, async (req, res) => {
-  try {
-    if (req.user.role !== "admin") {
-      return res.status(403).json({
-        message: "Only admins can view transactions",
-      });
-    }
 
+app.get("/api/admin/transactions", verifyToken, verifyAdmin, async (req, res) => {
+  try {
     const transactions = await collections.payments
       .find({})
-      .sort({ createdAt: -1 })
+      .sort({ paidAt: -1 })
       .toArray();
 
     res.json(transactions);
@@ -1279,6 +1428,7 @@ app.get("/api/admin/transactions", verifyToken, async (req, res) => {
     });
   }
 });
+
 
 
 

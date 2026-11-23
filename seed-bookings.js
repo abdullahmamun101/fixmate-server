@@ -15,16 +15,10 @@ async function runSeed() {
     await client.connect();
 
     const db = client.db(process.env.DB_NAME);
+
     const users = db.collection("user");
     const services = db.collection("services");
     const bookings = db.collection("bookings");
-
-    const alreadySeeded = await bookings.findOne({ seedTag });
-
-    if (alreadySeeded) {
-      console.log("Sample bookings already exist. No duplicates inserted.");
-      return;
-    }
 
     const customer = await users.findOne({
       email: "customer@gmail.com",
@@ -39,6 +33,7 @@ async function runSeed() {
         approvalStatus: "approved",
         isAvailable: true,
       })
+      .sort({ createdAt: -1 })
       .limit(5)
       .toArray();
 
@@ -56,31 +51,49 @@ async function runSeed() {
 
     const now = new Date();
 
-    const documents = serviceList.map((service, index) => ({
-      serviceId: service._id,
-      serviceTitle: service.title,
-      technicianEmail: service.technicianEmail,
-      customerEmail: customer.email,
-      customerName: customer.name,
-      phone: "01700000000",
-      address: "Dhanmondi, Dhaka",
-      preferredDate: new Date(
-        now.getTime() + (index + 3) * 24 * 60 * 60 * 1000
-      ),
-      problemDescription: `Sample booking for ${service.title}`,
-      status: statuses[index],
-      paymentStatus: "unpaid",
-      finalAmount:
-        statuses[index] === "completed"
-          ? Number(service.basePrice) + 300
-          : null,
-      createdAt: now,
-      seedTag,
-    }));
+    const documents = [];
+
+    for (const [index, service] of serviceList.entries()) {
+      const technician = await users.findOne({
+        email: service.technicianEmail,
+      });
+
+      documents.push({
+        serviceId: service._id.toString(),
+        serviceTitle: service.title,
+        serviceImage: service.image || "",
+        category: service.category,
+        basePrice: Number(service.basePrice),
+        technicianName:
+          service.technicianName ||
+          technician?.name ||
+          "FixMate Technician",
+        technicianEmail: service.technicianEmail,
+        customerName: customer.name || "",
+        customerEmail: customer.email,
+        customerPhone: "01700000000",
+        address: "Dhanmondi, Dhaka",
+        preferredDate: new Date(
+          now.getTime() + (index + 3) * 24 * 60 * 60 * 1000
+        ),
+        problemDescription: `Sample booking request for ${service.title}`,
+        status: statuses[index],
+        paymentStatus: "unpaid",
+        finalAmount:
+          statuses[index] === "completed"
+            ? Number(service.basePrice) + 300
+            : null,
+        createdAt: now,
+        seedTag,
+      });
+    }
+
+    // Remove only previous demo bookings created by this seed script
+    await bookings.deleteMany({ seedTag });
 
     const result = await bookings.insertMany(documents);
 
-    console.log(`${result.insertedCount} sample bookings inserted.`);
+    console.log(`${result.insertedCount} sample bookings inserted successfully.`);
   } catch (error) {
     console.error("Booking seed error:", error);
   } finally {
