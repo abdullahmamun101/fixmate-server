@@ -33,21 +33,26 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 const port = process.env.PORT || 5000;
 
+
 const allowedOrigins = [
   process.env.CLIENT_URL,
+  "https://fixmate-client-sepia.vercel.app",
   "http://localhost:3000",
-].filter(Boolean).map((origin) => origin.replace(/\/$/, ""));
+]
+  .filter(Boolean)
+  .map((origin) => origin.replace(/\/+$/, ""));
 
 app.use(
   cors({
     origin: (origin, callback) => {
       if (
         !origin ||
-        allowedOrigins.includes(origin.replace(/\/$/, ""))
+        allowedOrigins.includes(origin.replace(/\/+$/, ""))
       ) {
         callback(null, true);
       } else {
-        callback(new Error("Not allowed by CORS"));
+        console.error("Blocked CORS origin:", origin);
+        callback(null, false);
       }
     },
     credentials: true,
@@ -55,6 +60,7 @@ app.use(
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
+
 
 
 app.use(
