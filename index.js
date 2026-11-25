@@ -37,10 +37,7 @@ const port = process.env.PORT || 5000;
 const allowedOrigins = [
   process.env.CLIENT_URL,
   "https://fixmate-client-sepia.vercel.app",
-  "http://localhost:3000",
-]
-  .filter(Boolean)
-  .map((origin) => origin.replace(/\/+$/, ""));
+].filter(Boolean).map((origin) => origin.replace(/\/+$/, ""));
 
 app.use(
   cors({
@@ -52,7 +49,7 @@ app.use(
         callback(null, true);
       } else {
         console.error("Blocked CORS origin:", origin);
-        callback(null, false);
+        callback(new Error("Not allowed by CORS"));
       }
     },
     credentials: true,
